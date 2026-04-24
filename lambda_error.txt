@@ -1,2 +1,0 @@
-
-An error occurred (InvalidParameterValueException) when calling the CreateFunction operation: The image manifest, config or layer media type for the source image 050451360541.dkr.ecr.us-east-1.amazonaws.com/mobilenet-repo:latest is not supported.

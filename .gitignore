@@ -1,1 +1,5 @@
 ﻿rootkey.csv
+
+__pycache__/
+*.docx
+.streamlit/

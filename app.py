@@ -1,4 +1,18 @@
+import os
 import streamlit as st
+import textwrap
+
+# Explicitly load Streamlit Cloud Secrets into Environment Variables for boto3
+try:
+    if "AWS_ACCESS_KEY_ID" in st.secrets:
+        os.environ["AWS_ACCESS_KEY_ID"] = st.secrets["AWS_ACCESS_KEY_ID"]
+    if "AWS_SECRET_ACCESS_KEY" in st.secrets:
+        os.environ["AWS_SECRET_ACCESS_KEY"] = st.secrets["AWS_SECRET_ACCESS_KEY"]
+    if "AWS_DEFAULT_REGION" in st.secrets:
+        os.environ["AWS_DEFAULT_REGION"] = st.secrets["AWS_DEFAULT_REGION"]
+except Exception:
+    pass
+
 import boto3
 import base64
 import json
@@ -24,9 +38,16 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_models():
-    # Load Feature Extractor (Edge Compute)
-    features_net = torch.load('slice_1.pt', map_location='cpu', weights_only=False)
-    features_net.eval()
+    import torch.nn as nn
+    slices_list = []
+    for i in range(1, 6):
+        s = torch.load(f'slice_{i}.pt', map_location='cpu', weights_only=False)
+        if isinstance(s, nn.ModuleDict):
+            s['features_end'].eval()
+            s['avgpool'].eval()
+        else:
+            s.eval()
+        slices_list.append(s)
     
     # Load Monolithic Model (for baseline comparison)
     import sys
@@ -38,10 +59,10 @@ def load_models():
     full_model.load_state_dict(state_dict)
     full_model.eval()
     
-    return features_net, full_model
+    return slices_list, full_model
 
 try:
-    FEATURES_MODEL, FULL_MODEL = load_models()
+    SLICES_LIST, FULL_MODEL = load_models()
 except Exception as e:
     st.error(f"Failed to load local models: {e}")
     st.stop()
@@ -74,10 +95,19 @@ with st.sidebar:
     st.caption("Environment: Simulated Edge-Cloud")
     
     st.markdown("### Architecture Specs")
+    
+    run_mode = st.radio("Execution Backend", ["Local Simulation", "AWS Step Functions"], help="AWS is fixed at 5 slices.")
+    if run_mode == "Local Simulation":
+        num_slices = st.slider("Number of Slices", min_value=2, max_value=5, value=3)
+    else:
+        st.info("AWS Pipeline uses exactly 5 slices.")
+        num_slices = 5
+        
     with st.container():
-        st.markdown("""
+        st.markdown(f"""
         **Model**: MobileNetV3-Small  
-        **Mode**: Split Computing (Local Demo)  
+        **Mode**: {run_mode}  
+        **Slices**: {num_slices} Active  
         **Cost**: $0.00 / Request
         """)
     
@@ -270,6 +300,15 @@ st.markdown(f"""
 # -----------------------------------------------------------------------------
 # Main Application Logic
 # -----------------------------------------------------------------------------
+
+# Dictionary mapping class index to a readable string label. Update these as needed!
+CLASS_MAPPING = {
+    0: "Dog",
+    1: "Elephant",
+    2: "Lion",
+    3: "Tiger"
+}
+
 st.title("MobileNetV3 Inference")
 st.markdown("Upload an image to deploy the serverless inference pipeline.")
 
@@ -303,10 +342,7 @@ with tab1:
                             try:
                                 start_time = time.time()
                             
-                                # Edge Simulation (Feature Extraction)
                                 tensor = transform_image(image)
-                                with torch.no_grad():
-                                    features = FEATURES_MODEL(tensor)
                                 
                                 # Monolithic Local Inference (For Comparison)
                                 local_start_time = time.time()
@@ -314,119 +350,145 @@ with tab1:
                                     local_output = FULL_MODEL(tensor)
                                 local_end_time = time.time()
                                 local_latency_ms = (local_end_time - local_start_time) * 1000
-                            
-                                # Serialize intermediate features
-                                buffer = io.BytesIO()
-                                torch.save(features, buffer)
-                                buffer.seek(0)
-                            
-                                # Real Network Transfer & Cloud Simulation (Classification)
-                                try:
-                                    cloud_start_time = time.time()
                                 
-                                    # Use Boto3 to orchestrate S3 + Step Functions
-                                    sts = boto3.client('sts')
-                                    account_id = sts.get_caller_identity()['Account']
-                                    region = boto3.session.Session().region_name or 'us-east-1'
-                                    bucket_name = f"mobilenet-slices-{account_id}-{region}"
+                                sliced_latency_ms = 0
+                                class_idx = 0
+                                confidence = 0.0
+                                arch = ""
                                 
-                                    session_id = str(uuid.uuid4())
-                                    input_s3_key = f"{session_id}/tensor_1.pt"
-                                
-                                    # Upload to S3
-                                    s3 = boto3.client('s3', region_name=region)
-                                    s3.upload_fileobj(buffer, bucket_name, input_s3_key)
-                                
-                                    # Trigger Step Function
-                                    sf = boto3.client('stepfunctions', region_name=region)
-                                    state_machine_arn = f"arn:aws:states:{region}:{account_id}:stateMachine:MobileNetInferenceStateMachine"
-                                
-                                    sf_payload = json.dumps({
-                                        "session_id": session_id,
-                                        "bucket_name": bucket_name,
-                                        "input_tensor_s3_key": input_s3_key
-                                    })
-                                
-                                    st.toast("Invoking N-Slice AWS Step Function...", icon="🔄")
-                                    response = sf.start_execution(
-                                        stateMachineArn=state_machine_arn,
-                                        input=sf_payload
-                                    )
-                                    execution_arn = response['executionArn']
-                                
-                                    # Wait for execution to finish
-                                    status = 'RUNNING'
-                                    sf_result = {}
-                                    timeout_counter = 0
-                                
-                                    # UI Placeholder for live tracking
-                                    execution_placeholder = st.empty()
-                                
-                                    while status == 'RUNNING':
-                                        if timeout_counter > 30:
-                                            st.error("Step Function timed out locally.")
-                                            st.stop()
-                                        time.sleep(1.5) # Slight delay
-                                        timeout_counter += 1
+                                if run_mode == "AWS Step Functions":
+                                    with torch.no_grad():
+                                        features = SLICES_LIST[0](tensor)
+                                    buffer = io.BytesIO()
+                                    torch.save(features, buffer)
+                                    buffer.seek(0)
                                     
-                                        # Describe overall state
-                                        desc = sf.describe_execution(executionArn=execution_arn)
-                                        status = desc['status']
-                                    
-                                        # Describe history logic to trace active slice
-                                        try:
-                                            history = sf.get_execution_history(executionArn=execution_arn, maxResults=100, reverseOrder=True)
-                                            events = history.get('events', [])
-                                            active_state = "Starting..."
-                                            for event in events:
-                                                if 'stateEnteredEventDetails' in event:
-                                                    active_state = event['stateEnteredEventDetails']['name']
-                                                    break
+                                    try:
+                                        sts = boto3.client('sts')
+                                        account_id = sts.get_caller_identity()['Account']
+                                        region = boto3.session.Session().region_name or 'us-east-1'
+                                        bucket_name = f"mobilenet-slices-{account_id}-{region}"
+                                        
+                                        session_id = str(uuid.uuid4())
+                                        input_s3_key = f"{session_id}/tensor_1.pt"
+                                        
+                                        s3 = boto3.client('s3', region_name=region)
+                                        s3.upload_fileobj(buffer, bucket_name, input_s3_key)
+                                        
+                                        sf = boto3.client('stepfunctions', region_name=region)
+                                        state_machine_arn = f"arn:aws:states:{region}:{account_id}:stateMachine:MobileNetInferenceStateMachine"
+                                        
+                                        sf_payload = json.dumps({
+                                            "session_id": session_id,
+                                            "bucket_name": bucket_name,
+                                            "input_tensor_s3_key": input_s3_key
+                                        })
+                                        
+                                        st.toast("Invoking N-Slice AWS Step Function...", icon="🔄")
+                                        response = sf.start_execution(
+                                            stateMachineArn=state_machine_arn,
+                                            input=sf_payload
+                                        )
+                                        execution_arn = response['executionArn']
+                                        
+                                        status = 'RUNNING'
+                                        sf_result = {}
+                                        timeout_counter = 0
+                                        execution_placeholder = st.empty()
+                                        
+                                        while status == 'RUNNING':
+                                            if timeout_counter > 30:
+                                                st.error("Step Function timed out.")
+                                                st.stop()
+                                            time.sleep(1.5)
+                                            timeout_counter += 1
                                             
-                                            # Map state internal name to human UI name
-                                            slice_map = {
-                                                "Execute_Slice_2": "Cloud (Step 1)",
-                                                "Execute_Slice_3": "Cloud (Step 2)",
-                                                "Execute_Slice_4": "Cloud (Step 3)",
-                                                "Execute_Slice_5": "Cloud (Classifier)"
-                                            }
-                                            ui_state = slice_map.get(active_state, active_state)
-                                        
-                                            with execution_placeholder.container():
-                                                st.markdown(f"**Live Trace:** Edge Extract ✅ ➔ Processing: **{ui_state}** ⏳")
-                                        except Exception:
-                                            pass # Ignore history lookup failures if IAM limits occur
-                                        
-                                        if status == 'SUCCEEDED':
-                                            sf_result = json.loads(desc['output'])
-                                            execution_placeholder.success("Pipeline Chain Complete! ✅")
-                                        elif status in ['FAILED', 'TIMED_OUT', 'ABORTED']:
-                                            st.error(f"AWS Execution Error: {status}")
+                                            desc = sf.describe_execution(executionArn=execution_arn)
+                                            status = desc['status']
+                                            
+                                            try:
+                                                history = sf.get_execution_history(executionArn=execution_arn, maxResults=100, reverseOrder=True)
+                                                events = history.get('events', [])
+                                                active_state = "Starting..."
+                                                for event in events:
+                                                    if 'stateEnteredEventDetails' in event:
+                                                        active_state = event['stateEnteredEventDetails']['name']
+                                                        break
+                                                slice_map = {
+                                                    "Execute_Slice_2": "Cloud (Step 1)",
+                                                    "Execute_Slice_3": "Cloud (Step 2)",
+                                                    "Execute_Slice_4": "Cloud (Step 3)",
+                                                    "Execute_Slice_5": "Cloud (Classifier)"
+                                                }
+                                                ui_state = slice_map.get(active_state, active_state)
+                                                with execution_placeholder.container():
+                                                    st.markdown(f"**Live Trace:** Edge Extract ✅ ➔ Processing: **{ui_state}** ⏳")
+                                            except Exception:
+                                                pass
+                                            
+                                            if status == 'SUCCEEDED':
+                                                sf_result = json.loads(desc['output'])
+                                                execution_placeholder.success("Pipeline Chain Complete! ✅")
+                                            elif status in ['FAILED', 'TIMED_OUT', 'ABORTED']:
+                                                st.error(f"AWS Execution Error: {status}")
+                                                st.stop()
+                                                
+                                        if 'error' in sf_result:
+                                            st.error(f"Cloud Logic Error: {sf_result['error']}")
                                             st.stop()
+                                            
+                                        class_idx = sf_result.get("class_idx", 0)
+                                        confidence = sf_result.get("confidence", 0.0)
+                                        arch = "AWS Step Functions (5-Slice)"
                                         
-                                    if 'error' in sf_result:
-                                        st.error(f"Cloud Server Logic Error: {sf_result['error']}")
+                                    except Exception as e:
+                                        st.error(f"❌ Failed to reach AWS: {str(e)}")
                                         st.stop()
-                                
-                                    class_idx = sf_result.get("class_idx", 0)
-                                    confidence = sf_result.get("confidence", 0.0)
-                                    arch = sf_result.get("architecture", "n-slice-step-functions")
-                                
-                                except Exception as e:
-                                    st.error(f"❌ Failed to reach AWS: {str(e)}")
-                                    st.stop()
-                                
-                                end_time = time.time()
-                                latency = (end_time - start_time) * 1000
+                                        
+                                    end_time = time.time()
+                                    sliced_latency_ms = (end_time - start_time) * 1000
+                                else:
+                                    # Local Simulation of N-Slices
+                                    def split_into_n_chunks(lst, n):
+                                        k, m = divmod(len(lst), n)
+                                        return [lst[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(n)]
+                                        
+                                    sub_pipelines = split_into_n_chunks(SLICES_LIST, num_slices)
+                                    sim_start_time = time.time()
+                                    current_tensor = tensor
+                                    import torch.nn as nn
+                                    
+                                    with torch.no_grad():
+                                        for step, pipe in enumerate(sub_pipelines):
+                                            if step > 0:
+                                                # mock network hop latency to visualize architecture trade-offs
+                                                time.sleep(0.08) 
+                                            for s in pipe:
+                                                if isinstance(s, nn.ModuleDict):
+                                                    current_tensor = s['features_end'](current_tensor)
+                                                    current_tensor = s['avgpool'](current_tensor)
+                                                elif s is SLICES_LIST[4]:
+                                                    current_tensor = torch.flatten(current_tensor, 1)
+                                                    current_tensor = s(current_tensor)
+                                                else:
+                                                    current_tensor = s(current_tensor)
+                                                    
+                                    sim_end_time = time.time()
+                                    sliced_latency_ms = (sim_end_time - sim_start_time) * 1000
+                                    
+                                    _, predicted = torch.max(current_tensor, 1)
+                                    class_idx = predicted.item()
+                                    confidence = torch.nn.functional.softmax(current_tensor, dim=1)[0][class_idx].item()
+                                    arch = f"Local Simulation ({num_slices}-Slice)"
                             
-                                # Format result
                                 result = {
                                     "filename": uploaded_file.name,
-                                    "class": f"Class {class_idx}",
+                                    "class": CLASS_MAPPING.get(class_idx, f"Class {class_idx}"),
                                     "confidence": confidence,
-                                    "latency_ms": round(latency, 2),
+                                    "latency_ms": round(sliced_latency_ms, 2),
                                     "local_latency_ms": round(local_latency_ms, 2),
-                                    "architecture": "n-slice-step-functions"
+                                    "architecture": arch,
+                                    "num_slices": num_slices
                                 }
                                 batch_results.append(result)
                                 progress_bar.progress((idx + 1) / len(uploaded_files))
@@ -442,42 +504,37 @@ with tab1:
         
         if 'batch_history' in st.session_state and len(st.session_state['batch_history']) > 0:
             res_list = st.session_state['batch_history']
-            latest_res = res_list[-1]  # Get the very last inference for the main card display
             
-            # Show the most recent result box
-            st.markdown(f"""
-            <div style="background-color: var(--card-bg); padding: 20px; border-radius: 12px; border-left: 5px solid var(--accent); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); word-wrap: break-word;">
-                <h4 style="color: var(--subtext); margin: 0;">Predicted Class (Latest: {latest_res.get('filename')})</h4>
-                <h1 style="color: var(--text-heading); font-size: 2.2rem; margin: 10px 0; word-wrap: break-word;">{latest_res.get('class', 'Unknown')}</h1>
-                <p style="color: var(--text-main);">Confidence Score: <strong>{latest_res.get('confidence', 0)*100:.2f}%</strong></p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("### Metrics (Latest)")
-            
-            # Custom HTML Metric Cards to prevent truncation
-            lat = latest_res.get('latency_ms', 0)
-            lat_str = f"{lat/1000:.2f} s" if lat > 1000 else f"{lat} ms"
-            
-            st.markdown(f"""
-            <div style="display: flex; gap: 15px; margin-top: 10px;">
-                <div style="flex: 1; background-color: var(--card-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
-                    <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Compute Type</p>
-                    <p style="color: var(--text-heading); font-size: 1.3rem; font-weight: bold; margin: 5px 0 0 0; word-wrap: break-word;">AWS Step Functions</p>
-                </div>
-                <div style="flex: 1; background-color: var(--card-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
-                    <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Latency</p>
-                    <p style="color: var(--text-heading); font-size: 1.3rem; font-weight: bold; margin: 5px 0 0 0; word-wrap: break-word;">{lat_str}</p>
-                </div>
-                <div style="flex: 1; background-color: var(--card-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
-                    <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Cost</p>
-                    <p style="color: var(--text-heading); font-size: 1.3rem; font-weight: bold; margin: 5px 0 0 0;">$0.00</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            # Show all inferences inside a scrollable container
+            history_container = st.container(height=500, border=False)
+            with history_container:
+                for res in reversed(res_list):
+                    lat = res.get('latency_ms', 0)
+                    lat_str = f"{lat/1000:.2f} s" if lat > 1000 else f"{lat} ms"
+                    st.markdown(textwrap.dedent(f"""
+                    <div style="background-color: var(--card-bg); padding: 20px; border-radius: 12px; border-left: 5px solid var(--accent); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); word-wrap: break-word; margin-bottom: 20px;">
+                        <h4 style="color: var(--subtext); margin: 0;">Predicted Class (File: {res.get('filename')})</h4>
+                        <h1 style="color: var(--text-heading); font-size: 2.2rem; margin: 10px 0; word-wrap: break-word;">{res.get('class', 'Unknown')}</h1>
+                        <p style="color: var(--text-main);">Confidence Score: <strong>{res.get('confidence', 0)*100:.2f}%</strong></p>
+                        <div style="display: flex; gap: 15px; margin-top: 15px;">
+                            <div style="flex: 1; background-color: var(--bg-color); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Compute Type</p>
+                                <p style="color: var(--text-heading); font-size: 1.2rem; font-weight: bold; margin: 5px 0 0 0; word-wrap: break-word;">{res.get('architecture')}</p>
+                            </div>
+                            <div style="flex: 1; background-color: var(--bg-color); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Latency</p>
+                                <p style="color: var(--text-heading); font-size: 1.2rem; font-weight: bold; margin: 5px 0 0 0; word-wrap: break-word;">{lat_str}</p>
+                            </div>
+                            <div style="flex: 1; background-color: var(--bg-color); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                <p style="color: var(--subtext); font-size: 0.85rem; margin: 0; text-transform: uppercase;">Cost</p>
+                                <p style="color: var(--text-heading); font-size: 1.2rem; font-weight: bold; margin: 5px 0 0 0;">$0.00</p>
+                            </div>
+                        </div>
+                    </div>
+                    """), unsafe_allow_html=True)
             
             # Always show graph across history
-            st.markdown(f"### Historical Latency Comparison ({len(res_list)} total runs)")
+            st.markdown(f"### Infrastructure Performance Comparison ({len(res_list)} total runs)")
             import pandas as pd
             # Create unique display names so identical files don't stack weirdly
             for i, r in enumerate(res_list):
@@ -485,54 +542,73 @@ with tab1:
                     r["display_name"] = f"[{i+1}] {r['filename']}"
                     
             df = pd.DataFrame(res_list)
-            chart_df = df.rename(columns={
-                "latency_ms": "Sliced Model (AWS) latency ms",
-                "local_latency_ms": "Full Model (Local) latency ms"
-            })
-            chart_df = chart_df.set_index("display_name")
             
-            # Split charts side-by-side to bypass linear scale eclipsing
-            col_aws_chart, col_local_chart = st.columns(2)
-            with col_aws_chart:
-                st.markdown("##### Cloud Deployment (AWS)")
-                st.bar_chart(chart_df[["Sliced Model (AWS) latency ms"]], color="#8B5CF6")
-            with col_local_chart:
-                st.markdown("##### Local Monolithic")
-                st.bar_chart(chart_df[["Full Model (Local) latency ms"]], color="#22C55E")
+            # --- 1. Execution Latency (Per Request) ---
+            exec_lat_df = df[["display_name", "local_latency_ms", "latency_ms"]].copy()
+            exec_lat_df.rename(columns={
+                "local_latency_ms": "Physical", 
+                "latency_ms": "Cloud"
+            }, inplace=True)
+            exec_lat_df.set_index("display_name", inplace=True)
             
-            avg_lat = sum(r['latency_ms'] for r in res_list) / len(res_list)
-            avg_lat_str = f"{avg_lat/1000:.2f} s" if avg_lat > 1000 else f"{round(avg_lat, 2)} ms"
-            avg_local_lat = sum(r.get('local_latency_ms', 0) for r in res_list) / len(res_list)
-            avg_local_lat_str = f"{avg_local_lat/1000:.2f} s" if avg_local_lat > 1000 else f"{round(avg_local_lat, 2)} ms"
-            st.markdown(f"""
-            <div style="display: flex; gap: 15px; margin-top: 15px;">
-                <!-- Cloud Model Overview -->
-                <div style="flex: 1; background-color: var(--card-bg); padding: 20px; border-radius: 12px; border: 2px solid var(--accent);">
-                    <h4 style="color: var(--accent); margin: 0 0 15px 0;">☁️ Cloud Serverless Sliced Model</h4>
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                        <span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Average Latency</span>
-                        <strong style="color: var(--text-heading); font-size: 1.1rem;">{avg_lat_str}</strong>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Peak Node Memory</span>
-                        <strong style="color: var(--success-border); font-size: 1.1rem;">600 MB (Scalable)</strong>
-                    </div>
-                </div>
-
-                <!-- Local Model Overview -->
-                <div style="flex: 1; background-color: var(--card-bg); padding: 20px; border-radius: 12px; border: 2px solid #22C55E;">
-                    <h4 style="color: #22C55E; margin: 0 0 15px 0;">💻 Local Monolithic Edge Model</h4>
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                        <span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Average Latency</span>
-                        <strong style="color: var(--text-heading); font-size: 1.1rem;">{avg_local_lat_str}</strong>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Peak Node Memory</span>
-                        <strong style="color: var(--red-text); font-size: 1.1rem;">3008 MB (Monolith)</strong>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("##### 1. Execution Latency per Request (ms)")
+            st.bar_chart(exec_lat_df, color=["#22C55E", "#8B5CF6"])
+            
+            # --- 2. Average Latency ---
+            avg_cloud = df["latency_ms"].mean()
+            avg_physical = df["local_latency_ms"].mean()
+            
+            avg_lat_df = pd.DataFrame([
+                {"Metric": "Average Latency", "Physical": avg_physical, "Cloud": avg_cloud}
+            ]).set_index("Metric")
+            
+            # --- 3. Runtime Memory ---
+            mem_physical = 3008 * len(res_list)
+            mem_cloud = 600 * len(res_list)
+            
+            mem_df = pd.DataFrame([
+                {"Metric": "Runtime Memory", "Physical": mem_physical, "Cloud": mem_cloud}
+            ]).set_index("Metric")
+            
+            col_metrics1, col_metrics2 = st.columns(2)
+            with col_metrics1:
+                st.markdown("##### 2. Average Latency Comparison (ms)")
+                st.bar_chart(avg_lat_df, color=["#22C55E", "#8B5CF6"])
+            with col_metrics2:
+                st.markdown("##### 3. Runtime Memory Comparison (MB)")
+                st.bar_chart(mem_df, color=["#22C55E", "#8B5CF6"])
+            
+            avg_lat_str = f"{avg_cloud/1000:.2f} s" if avg_cloud > 1000 else f"{round(avg_cloud, 2)} ms"
+            avg_local_lat_str = f"{avg_physical/1000:.2f} s" if avg_physical > 1000 else f"{round(avg_physical, 2)} ms"
+            
+            st.markdown(textwrap.dedent(f"""
+<div style="display: flex; gap: 15px; margin-top: 15px;">
+<!-- Cloud Model Overview -->
+<div style="flex: 1; background-color: var(--card-bg); padding: 20px; border-radius: 12px; border: 2px solid var(--accent);">
+<h4 style="color: var(--accent); margin: 0 0 15px 0;">☁️ Cloud Infrastructure (Sliced)</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+<span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Average Latency</span>
+<strong style="color: var(--text-heading); font-size: 1.1rem;">{avg_lat_str}</strong>
+</div>
+<div style="display: flex; justify-content: space-between;">
+<span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Peak Node Memory</span>
+<strong style="color: var(--success-border); font-size: 1.1rem;">{mem_cloud} MB (Scalable)</strong>
+</div>
+</div>
+<!-- Local Model Overview -->
+<div style="flex: 1; background-color: var(--card-bg); padding: 20px; border-radius: 12px; border: 2px solid #22C55E;">
+<h4 style="color: #22C55E; margin: 0 0 15px 0;">🏢 Physical Infrastructure (Monolithic)</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+<span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Average Latency</span>
+<strong style="color: var(--text-heading); font-size: 1.1rem;">{avg_local_lat_str}</strong>
+</div>
+<div style="display: flex; justify-content: space-between;">
+<span style="color: var(--subtext); font-size: 0.9rem; text-transform: uppercase;">Peak Node Memory</span>
+<strong style="color: var(--red-text); font-size: 1.1rem;">{mem_physical} MB (Monolith)</strong>
+</div>
+</div>
+</div>
+"""), unsafe_allow_html=True)
         else:
             st.info("Waiting for input stream...")
 
@@ -545,6 +621,28 @@ with tab2:
         
         import pandas as pd
         
+        st.markdown("### Before Slicing vs After Slicing Analysis")
+        
+        col_ba1, col_ba2 = st.columns(2)
+        with col_ba1:
+            st.markdown("##### 1. Operational Metrics Comparison")
+            before_after_df = pd.DataFrame([
+                {"Metric": "Peak Runtime Memory (MB)", "Before Slicing (Monolith)": 3008, "After Slicing (Sliced)": 600},
+                {"Metric": "Execution Latency (ms)", "Before Slicing (Monolith)": 500, "After Slicing (Sliced)": 3500}
+            ]).set_index("Metric")
+            st.bar_chart(before_after_df, color=["#22C55E", "#8B5CF6"])
+            
+        with col_ba2:
+            st.markdown("##### 2. Model Artifact Sizes (Storage Distribution)")
+            artifact_df = pd.DataFrame({
+                "Artifact Structure": ["Before Slicing (1 File)", "After Slicing (5 Files Combined)"],
+                "Largest Single File (MB)": [6.21, 2.91]
+            }).set_index("Artifact Structure")
+            st.bar_chart(artifact_df, color="#F59E0B")
+            
+        st.markdown("---")
+        
+        st.markdown("### Extended Architecture Trade-offs")
         # Pareto front simulated dataset validating the research paper dynamics
         tradeoff_data = pd.DataFrame({
             "Configuration": ["1-Slice (Monolithic Cloud)", "2-Slice (Edge + 1 Cloud)", "5-Slice (N-Slice)"],
@@ -562,13 +660,13 @@ with tab2:
         with colB:
             st.markdown("##### Metric Breakdown")
             for i, row in tradeoff_data.iterrows():
-                st.markdown(f"""
+                st.markdown(textwrap.dedent(f"""
                 <div style="background-color: var(--card-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3);">
-                    <h5 style="color: var(--text-heading); margin-bottom: 5px; font-size: 1rem;">{{row['Configuration']}}</h5>
-                    <p style="color: var(--subtext); margin: 0; font-size: 0.9em;">Peak Node Memory: <br/><strong style="color: var(--accent); font-size: 1.1em;">{{row['Memory Allocated (MB)']}} MB</strong></p>
-                    <p style="color: var(--subtext); margin: 0; font-size: 0.9em;">Cold Start Latency: <br/><strong style="color: var(--red-text); font-size: 1.1em;">{{row['Execution Latency (ms)']}} ms</strong></p>
+                    <h5 style="color: var(--text-heading); margin-bottom: 5px; font-size: 1rem;">{row['Configuration']}</h5>
+                    <p style="color: var(--subtext); margin: 0; font-size: 0.9em;">Peak Node Memory: <br/><strong style="color: var(--accent); font-size: 1.1em;">{row['Memory Allocated (MB)']} MB</strong></p>
+                    <p style="color: var(--subtext); margin: 0; font-size: 0.9em;">Cold Start Latency: <br/><strong style="color: var(--red-text); font-size: 1.1em;">{row['Execution Latency (ms)']} ms</strong></p>
                 </div>
-                """, unsafe_allow_html=True)
+                """), unsafe_allow_html=True)
     else:
         st.info("Waiting for input stream. Upload and process an image to view architecture trade-offs.")
             
