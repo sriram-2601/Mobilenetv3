@@ -567,7 +567,7 @@ with tab1:
             exec_lat_df.set_index("display_name", inplace=True)
             
             st.markdown("##### 1. Execution Latency per Request (ms)")
-            st.bar_chart(exec_lat_df, color=["#22C55E", "#8B5CF6"])
+            st.bar_chart(exec_lat_df, color=["#22C55E", "#8B5CF6"], horizontal=True)
             
             # --- 2. Average Latency ---
             avg_cloud = df["latency_ms"].mean()
@@ -588,10 +588,10 @@ with tab1:
             col_metrics1, col_metrics2 = st.columns(2)
             with col_metrics1:
                 st.markdown("##### 2. Average Latency Comparison (ms)")
-                st.bar_chart(avg_lat_df, color=["#22C55E", "#8B5CF6"])
+                st.bar_chart(avg_lat_df, color=["#22C55E", "#8B5CF6"], horizontal=True)
             with col_metrics2:
                 st.markdown("##### 3. Runtime Memory Comparison (MB)")
-                st.bar_chart(mem_df, color=["#22C55E", "#8B5CF6"])
+                st.bar_chart(mem_df, color=["#22C55E", "#8B5CF6"], horizontal=True)
             
             avg_lat_str = f"{avg_cloud/1000:.2f} s" if avg_cloud > 1000 else f"{round(avg_cloud, 2)} ms"
             avg_local_lat_str = f"{avg_physical/1000:.2f} s" if avg_physical > 1000 else f"{round(avg_physical, 2)} ms"
@@ -645,7 +645,7 @@ with tab2:
                 {"Metric": "Peak Runtime Memory (MB)", "Before Slicing (Monolith)": 3008, "After Slicing (Sliced)": 600},
                 {"Metric": "Execution Latency (ms)", "Before Slicing (Monolith)": 500, "After Slicing (Sliced)": 3500}
             ]).set_index("Metric")
-            st.bar_chart(before_after_df, color=["#22C55E", "#8B5CF6"])
+            st.bar_chart(before_after_df, color=["#22C55E", "#8B5CF6"], horizontal=True)
             
         with col_ba2:
             st.markdown("##### 2. Model Artifact Sizes (Storage Distribution)")
@@ -653,7 +653,7 @@ with tab2:
                 "Artifact Structure": ["Before Slicing (1 File)", "After Slicing (5 Files Combined)"],
                 "Largest Single File (MB)": [6.21, 2.91]
             }).set_index("Artifact Structure")
-            st.bar_chart(artifact_df, color="#F59E0B")
+            st.bar_chart(artifact_df, color="#F59E0B", horizontal=True)
             
         st.markdown("---")
         
