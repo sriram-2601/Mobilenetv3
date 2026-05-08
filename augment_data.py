@@ -21,7 +21,8 @@ animals_and_files = {
     "Elephant": "Elephant.jpg",
     "Dog": "Dog.jpeg",
     "Cheetah": "Cheetah.jpg",
-    "Cat": "Cat.jpeg"
+    "Cat": "Cat.jpeg",
+    "Monkey": "Monkey.jpg"
 }
 
 train_dir = os.path.join("data", "train")
