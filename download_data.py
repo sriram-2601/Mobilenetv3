@@ -12,14 +12,18 @@ def setup_data():
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(val_dir, exist_ok=True)
             
-    animals = ["Dog", "Elephant", "Lion", "Tiger"]
+    animals = ["Bear", "Zebra", "Giraffe", "Kangaroo", "Panda", "Penguin", "Rhino", "Hippo", "Wolf", "Fox", "Lion", "Elephant", "Dog", "Cheetah", "Cat"]
     
     # 2. Download Images to a temp dir
     temp_dir = "temp_downloads"
     if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
         
     for animal in animals:
+        if os.path.exists(os.path.join(train_dir, animal)) and len(os.listdir(os.path.join(train_dir, animal))) > 0:
+            print(f"Skipping {animal}, already exists.")
+            continue
+
         print(f"Downloading images for {animal}...")
         downloader.download(f"{animal} animal high quality", 
                             limit=25,  
@@ -55,7 +59,7 @@ def setup_data():
             
     # Cleanup temp directory
     if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
         
     print("Data download and split completed successfully!")
 

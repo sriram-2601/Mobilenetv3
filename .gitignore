@@ -1,5 +1,13 @@
-﻿rootkey.csv
+rootkey.csv
 
 __pycache__/
 *.docx
 .streamlit/
+.venv/
+data/
+temp_downloads/
+*.jpg
+*.jpeg
+*.png
+*.avif
+*.pdf
