@@ -325,7 +325,7 @@ st.title("MobileNetV3 Inference")
 st.markdown("Upload an image to deploy the serverless inference pipeline.")
 
 # Create tabs for structured view (AWS Console style)
-tab1, tab2, tab3 = st.tabs(["Inference Dashboard", "Trade-off Analytics (Paper Validation)", "System Logs"])
+tab1, tab2 = st.tabs(["Inference Dashboard", "Trade-off Analytics (Paper Validation)"])
 
 with tab1:
     col_input, col_result = st.columns([1, 1], gap="large")
@@ -689,8 +689,4 @@ with tab2:
                 """), unsafe_allow_html=True)
     else:
         st.info("Waiting for input stream. Upload and process an image to view architecture trade-offs.")
-            
-with tab3:
-    st.subheader("System Logs")
-    st.text_area("CloudWatch Logs Stream", "Waiting for execution events...\n", height=300)
 
