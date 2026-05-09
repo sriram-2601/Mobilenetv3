@@ -669,8 +669,13 @@ with tab2:
         
         with colA:
             st.markdown("##### The Pareto Trade-off Front")
-            chart_data = tradeoff_data.set_index("Execution Latency (ms)")["Memory Allocated (MB)"]
-            st.line_chart(chart_data)
+            import altair as alt
+            chart = alt.Chart(tradeoff_data).mark_line(point=alt.OverlayMarkDef(color="white", size=50)).encode(
+                x=alt.X("Execution Latency (ms)", title="Execution Latency (ms)"),
+                y=alt.Y("Memory Allocated (MB)", title="Peak Node Memory (MB)"),
+                tooltip=["Configuration", "Execution Latency (ms)", "Memory Allocated (MB)"]
+            ).interactive()
+            st.altair_chart(chart, use_container_width=True)
             
         with colB:
             st.markdown("##### Metric Breakdown")
